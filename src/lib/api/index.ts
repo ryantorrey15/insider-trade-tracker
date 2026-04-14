@@ -6,11 +6,10 @@
  * Enrichment:    FMP batch profile/quote lookups for company names and prices
  */
 
+import { createClient } from '@vercel/edge-config'
 import type { Trade, ClusterAlert, Stock, SignalType } from '@/types'
 import { fetchCongressionalTrades } from './congressional'
 import { fetchInsiderTransactions, fetchProfile, fetchQuote, enrichStock } from './stocks'
-import { fetchSecForm4Trades } from './sec-form4'
-import { fetchRecentDisclosures } from './disclosures'
 import { getRecentTrades } from '@/lib/mock-data'
 
 // ─── Cross-source conviction matching ────────────────────
@@ -187,13 +186,23 @@ export interface UnifiedFeedResult {
   sources: { congressional: 'live' | 'fallback'; insider: 'live' | 'fallback' }
 }
 
-/** Resolves to fallback if promise takes longer than ms */
-async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>
-  const timeout = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), ms)
-  })
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer!))
+/** Read pre-fetched trades from Edge Config (written by the daily cron job) */
+async function readCachedTrades(): Promise<{ congressional: Trade[] | null; corporate: Trade[] | null }> {
+  try {
+    const url = process.env.EDGE_CONFIG
+    if (!url) return { congressional: null, corporate: null }
+    const client = createClient(url)
+    const [congressional, corporate] = await Promise.all([
+      client.get<Trade[]>('congressionalTrades'),
+      client.get<Trade[]>('corporateTrades'),
+    ])
+    return {
+      congressional: Array.isArray(congressional) && congressional.length > 0 ? congressional : null,
+      corporate: Array.isArray(corporate) && corporate.length > 0 ? corporate : null,
+    }
+  } catch {
+    return { congressional: null, corporate: null }
+  }
 }
 
 /** Batch-enrich a list of trades with FMP company names/prices (top N unique tickers) */
@@ -235,56 +244,35 @@ async function enrichTradeBatch(trades: Trade[], maxTickers = 15): Promise<Trade
 export async function fetchUnifiedFeed(): Promise<UnifiedFeedResult> {
   const fetchedAt = new Date().toISOString()
 
-  // 1. Congressional — House PTR disclosures (real), timeout after 8s → mock fallback
-  let congTrades: Trade[]
-  let congSource: 'live' | 'fallback'
+  // 1. Read pre-fetched trades from Edge Config (written by daily cron, ~0ms)
+  const cached = await readCachedTrades()
 
-  const disclosureFallback = { trades: [] as Trade[], source: 'unavailable' as const, filings: [], parsedCount: 0, fetchedAt }
-  const disclosureResult = await withTimeout(fetchRecentDisclosures(4), 8_000, disclosureFallback)
+  // Congressional — use Edge Config cache, fall back to mock
+  const congTrades: Trade[] = cached.congressional ?? getRecentTrades(100, { source: 'congressional', tradeType: 'all' })
+  const congSource: 'live' | 'fallback' = cached.congressional ? 'live' : 'fallback'
 
-  if (disclosureResult.trades.length > 0) {
-    congTrades = disclosureResult.trades
-    congSource = 'live'
-  } else {
-    // Quiver Quant also tried as secondary fallback (usually 401s too, so goes straight to mock)
-    const quiverResult = await withTimeout(fetchCongressionalTrades(), 4_000, {
-      trades: getRecentTrades(100, { source: 'congressional', tradeType: 'all' }),
-      fetchedAt,
-      source: 'fallback' as const,
-    })
-    congTrades = quiverResult.trades
-    congSource = quiverResult.source
-  }
+  // Corporate — use Edge Config cache, fall back to mock
+  const allInsiderTrades: Trade[] = cached.corporate ?? getRecentTrades(50, { source: 'insider', tradeType: 'all' })
+  const insiderSource: 'live' | 'fallback' = cached.corporate ? 'live' : 'fallback'
 
-  // 2. Corporate — SEC EDGAR Form 4 (always fresh, no API key needed)
-  let allInsiderTrades: Trade[] = []
-  let insiderSource: 'live' | 'fallback' = 'fallback'
-
-  const rawForm4 = await withTimeout(fetchSecForm4Trades(), 20_000, [])
-  // Filter out trivial trades (<$10K) — keeps the feed signal-rich
-  allInsiderTrades = rawForm4.filter((t) => t.amount >= 10_000)
-
-  if (allInsiderTrades.length > 0) insiderSource = 'live'
-  else allInsiderTrades = getRecentTrades(50, { source: 'insider', tradeType: 'all' })
-
-  // 3. Enrich company names/prices for both feeds via FMP
+  // 2. Enrich company names/prices for both feeds via FMP
   const [enrichedCong, enrichedInsider] = await Promise.all([
     enrichTradeBatch(congTrades, 10),
     enrichTradeBatch(allInsiderTrades, 15),
   ])
 
-  // 4. Conviction matching — same ticker traded by politician + corporate insider within 90 days
+  // 3. Conviction matching — same ticker traded by politician + corporate insider within 90 days
   const convictionMatches = findConvictionMatches(enrichedCong, enrichedInsider)
 
-  // 5. Tag strong conviction onto trades
+  // 4. Tag strong conviction onto trades
   const taggedCong = tagConviction(enrichedCong, convictionMatches)
   const taggedInsider = tagConviction(enrichedInsider, convictionMatches)
 
-  // 6. Cluster alerts across both sources
+  // 5. Cluster alerts across both sources
   const allTrades = [...taggedCong, ...taggedInsider]
   const clusterAlerts = detectClusterAlerts(allTrades)
 
-  // 7. Combined feed — freshest trades first
+  // 6. Combined feed — freshest trades first
   const trades = allTrades.sort(
     (a, b) => new Date(b.tradeDate).getTime() - new Date(a.tradeDate).getTime()
   )

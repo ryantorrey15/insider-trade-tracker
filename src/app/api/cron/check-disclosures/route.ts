@@ -1,64 +1,52 @@
 /**
  * Vercel Cron endpoint — runs daily at 8 AM ET (13:00 UTC).
  *
- * Algorithm:
- * 1. Read lastDocId from Edge Config (persisted across runs)
- * 2. Fetch full House PTR filing list
- * 3. Filter to DocIds strictly greater than lastDocId → genuinely new filings
- * 4. Parse each new PDF for trade data
- * 5. Write new lastDocId back to Edge Config
+ * Fetches both congressional (House PTR) and corporate (SEC Form 4) trades,
+ * then stores them in Edge Config so the feed can serve them instantly.
  *
- * First run (no stored lastDocId): processes the 20 most recent filings
- * to bootstrap the cache, then stores the current max DocId.
+ * maxDuration = 60 gives us enough headroom for:
+ *  - 20 House PTR PDFs (~15s)
+ *  - 172 Form 4 XMLs at 7.5 req/s rate limit (~35s)
  */
 
 import { NextResponse } from 'next/server'
-import { createClient } from '@vercel/edge-config'
-import { getRecentHouseFilings, parsePtrPdf } from '@/lib/api/disclosures'
+import { fetchRecentDisclosures } from '@/lib/api/disclosures'
+import { fetchSecForm4Trades } from '@/lib/api/sec-form4'
+import type { Trade } from '@/types'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 const EDGE_CONFIG_URL = process.env.EDGE_CONFIG ?? ''
 const CRON_SECRET = process.env.CRON_SECRET ?? ''
-
-// Edge Config only supports reads via the SDK; writes go through the Vercel API.
 const VERCEL_TEAM_ID = process.env.VERCEL_TEAM_ID ?? ''
 const VERCEL_API_TOKEN = process.env.VERCEL_API_TOKEN ?? ''
 
-/** Read lastDocId from Edge Config */
-async function readLastDocId(): Promise<number> {
-  try {
-    if (!EDGE_CONFIG_URL) return 0
-    const client = createClient(EDGE_CONFIG_URL)
-    const val = await client.get<number>('lastDocId')
-    return typeof val === 'number' ? val : 0
-  } catch {
-    return 0
-  }
-}
-
-/** Write lastDocId to Edge Config via the Vercel API */
-async function writeLastDocId(docId: number): Promise<void> {
+/** Write multiple key/value pairs to Edge Config in a single PATCH */
+async function writeEdgeConfigItems(items: Array<{ key: string; value: unknown }>): Promise<void> {
   if (!VERCEL_API_TOKEN || !EDGE_CONFIG_URL) return
 
-  // Extract the Edge Config ID from the connection string
   const ecId = EDGE_CONFIG_URL.match(/ecfg_[a-z0-9]+/)?.[0]
   if (!ecId) return
 
   const teamParam = VERCEL_TEAM_ID ? `?teamId=${VERCEL_TEAM_ID}` : ''
   const url = `https://api.vercel.com/v1/edge-config/${ecId}/items${teamParam}`
 
-  await fetch(url, {
+  const res = await fetch(url, {
     method: 'PATCH',
     headers: {
       Authorization: `Bearer ${VERCEL_API_TOKEN}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      items: [{ operation: 'upsert', key: 'lastDocId', value: docId }],
+      items: items.map(({ key, value }) => ({ operation: 'upsert', key, value })),
     }),
   })
+
+  if (!res.ok) {
+    const text = await res.text()
+    console.error(`[cron] Edge Config write failed ${res.status}: ${text}`)
+  }
 }
 
 export async function GET(req: Request) {
@@ -70,50 +58,39 @@ export async function GET(req: Request) {
     }
   }
 
-  console.log('[cron] starting disclosure check...')
+  console.log('[cron] starting fetch — congressional + corporate...')
+  const startedAt = Date.now()
 
-  // 1. Get last known DocId
-  const lastDocId = await readLastDocId()
-  console.log(`[cron] lastDocId from Edge Config: ${lastDocId}`)
+  // Fetch both sources in parallel (each has its own internal rate limiting)
+  const [disclosureResult, corporateTrades] = await Promise.allSettled([
+    fetchRecentDisclosures(20),
+    fetchSecForm4Trades(30),
+  ])
 
-  // 2. Fetch the full filing list for the current year
-  const year = new Date().getFullYear()
-  const allFilings = await getRecentHouseFilings(200, year)
+  const congressional: Trade[] =
+    disclosureResult.status === 'fulfilled' ? disclosureResult.value.trades : []
 
-  // 3. Filter to new filings only
-  const newFilings = lastDocId === 0
-    ? allFilings.slice(0, 20)  // bootstrap: parse most recent 20
-    : allFilings.filter(f => parseInt(f.docId) > lastDocId)
+  const corporate: Trade[] =
+    corporateTrades.status === 'fulfilled' ? corporateTrades.value : []
 
-  console.log(`[cron] ${allFilings.length} total filings, ${newFilings.length} new since DocId ${lastDocId}`)
+  console.log(
+    `[cron] fetched ${congressional.length} congressional, ${corporate.length} corporate trades in ${Date.now() - startedAt}ms`
+  )
 
-  if (newFilings.length === 0) {
-    return NextResponse.json({
-      ok: true,
-      message: 'No new filings since last run',
-      lastDocId,
-      checkedAt: new Date().toISOString(),
-    })
-  }
+  // Store in Edge Config — cap at 50 congressional + 150 corporate to stay under item size limits
+  await writeEdgeConfigItems([
+    { key: 'congressionalTrades', value: congressional.slice(0, 50) },
+    { key: 'corporateTrades', value: corporate.slice(0, 150) },
+    { key: 'tradesUpdatedAt', value: new Date().toISOString() },
+  ])
 
-  // 4. Parse each new PDF
-  const results = await Promise.allSettled(newFilings.map(f => parsePtrPdf(f)))
-  let totalTrades = 0
-  for (const r of results) {
-    if (r.status === 'fulfilled') totalTrades += r.value.length
-  }
-
-  // 5. Update lastDocId to the highest DocId we just processed
-  const maxDocId = Math.max(...newFilings.map(f => parseInt(f.docId)))
-  await writeLastDocId(maxDocId)
-  console.log(`[cron] done — ${totalTrades} trades from ${newFilings.length} new filings. Updated lastDocId → ${maxDocId}`)
+  console.log('[cron] Edge Config updated')
 
   return NextResponse.json({
     ok: true,
-    newFilings: newFilings.length,
-    totalTrades,
-    previousDocId: lastDocId,
-    newLastDocId: maxDocId,
-    checkedAt: new Date().toISOString(),
+    congressional: congressional.length,
+    corporate: corporate.length,
+    updatedAt: new Date().toISOString(),
+    durationMs: Date.now() - startedAt,
   })
 }
