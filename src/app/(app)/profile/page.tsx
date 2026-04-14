@@ -1,6 +1,7 @@
 'use client'
 
-import { ChevronRight, Crown, Eye, HelpCircle, LogOut, Moon, Settings, Shield, Star } from 'lucide-react'
+import Link from 'next/link'
+import { ChevronRight, Crown, Eye, FileText, HelpCircle, Lock, LogOut, Moon, Settings, Shield, Star } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -19,7 +20,14 @@ const SETTINGS_GROUPS = [
     title: 'Support',
     items: [
       { icon: HelpCircle, label: 'Help & FAQ', href: '#' },
-      { icon: Eye, label: 'About InsiderTrack', href: '#' },
+      { icon: Eye, label: 'About InsiderEdge', href: '#' },
+    ],
+  },
+  {
+    title: 'Legal',
+    items: [
+      { icon: FileText, label: 'Disclaimer & Terms of Use', href: '/legal' },
+      { icon: Lock, label: 'Privacy Policy', href: '/legal#privacy' },
     ],
   },
 ]
@@ -116,16 +124,31 @@ export default function ProfilePage() {
               <CardContent className="p-0">
                 {group.items.map((item, i) => {
                   const Icon = item.icon
+                  const isLink = item.href !== '#'
+                  const inner = (
+                    <>
+                      <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span className="flex-1 text-sm font-medium text-foreground">
+                        {item.label}
+                      </span>
+                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                    </>
+                  )
                   return (
                     <div key={item.label}>
                       {i > 0 && <Separator />}
-                      <button className="flex items-center gap-3 w-full px-4 py-3.5 hover:bg-muted/50 transition-colors text-left">
-                        <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-                        <span className="flex-1 text-sm font-medium text-foreground">
-                          {item.label}
-                        </span>
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                      </button>
+                      {isLink ? (
+                        <Link
+                          href={item.href}
+                          className="flex items-center gap-3 w-full px-4 py-3.5 hover:bg-muted/50 transition-colors"
+                        >
+                          {inner}
+                        </Link>
+                      ) : (
+                        <button className="flex items-center gap-3 w-full px-4 py-3.5 hover:bg-muted/50 transition-colors text-left">
+                          {inner}
+                        </button>
+                      )}
                     </div>
                   )
                 })}
@@ -143,9 +166,13 @@ export default function ProfilePage() {
           Sign Out
         </Button>
 
-        <p className="text-center text-xs text-muted-foreground pb-2">
-          InsiderTrack v0.1.0 &bull; Built with Next.js
-        </p>
+        <div className="text-center space-y-1 pb-2">
+          <p className="text-xs text-muted-foreground">InsiderEdge v0.1.0</p>
+          <p className="text-[10px] text-muted-foreground/50">
+            For informational purposes only. Not financial advice.{' '}
+            <Link href="/legal" className="underline underline-offset-2">Legal</Link>
+          </p>
+        </div>
       </div>
     </div>
   )
