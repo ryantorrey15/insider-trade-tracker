@@ -1,14 +1,16 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { Shield, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { TradeFeed } from '@/components/trades/TradeFeed'
 import { FilterDrawer } from '@/components/trades/FilterDrawer'
-import { getRecentTrades, getCommitteeById, getClusterAlerts } from '@/lib/mock-data'
+import { FreshnessIndicator } from '@/components/ui/FreshnessIndicator'
+import { getRecentTrades, getCommitteeById, getClusterAlerts, COMMITTEES } from '@/lib/mock-data'
 import { formatCurrency } from '@/lib/utils'
-import type { FilterState } from '@/types'
+import type { FilterState, Trade, ClusterAlert } from '@/types'
+import type { UnifiedFeedResult } from '@/lib/api'
 
 const SOURCE_TABS: Array<{ label: string; value: FilterState['source'] }> = [
   { label: 'All', value: 'all' },
@@ -16,18 +18,90 @@ const SOURCE_TABS: Array<{ label: string; value: FilterState['source'] }> = [
   { label: 'Congress', value: 'congressional' },
 ]
 
+function applyFilters(trades: Trade[], filters: FilterState): Trade[] {
+  let result = [...trades]
+
+  if (filters.source && filters.source !== 'all') {
+    result = result.filter((t) => t.source === filters.source)
+  }
+  if (filters.tradeType && filters.tradeType !== 'all') {
+    result = result.filter((t) => t.tradeType === filters.tradeType)
+  }
+  if (filters.ticker) {
+    result = result.filter((t) =>
+      t.ticker.toLowerCase().includes(filters.ticker!.toLowerCase())
+    )
+  }
+  if (filters.personId) {
+    result = result.filter((t) => t.personId === filters.personId)
+  }
+  if (filters.committeeId) {
+    const committee = COMMITTEES.find((c) => c.id === filters.committeeId)
+    if (committee) {
+      result = result.filter((t) => committee.memberIds.includes(t.personId))
+    }
+  }
+  if (filters.signals && filters.signals.length > 0) {
+    result = result.filter((t) =>
+      filters.signals!.some((s) => t.signals.includes(s))
+    )
+  }
+  if (filters.minAmount) {
+    result = result.filter((t) => t.amount >= filters.minAmount!)
+  }
+  if (filters.hidePlannedTrades) {
+    result = result.filter((t) => !t.isPlannedTrade)
+  }
+
+  return result.slice(0, 100)
+}
+
 export default function FeedPage() {
   const [filters, setFilters] = useState<FilterState>({
     source: 'all',
     tradeType: 'all',
   })
 
-  const trades = useMemo(() => getRecentTrades(50, filters), [filters])
+  // Live data state
+  const [liveResult, setLiveResult] = useState<UnifiedFeedResult | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const fetchLiveData = useCallback(async () => {
+    try {
+      const res = await fetch('/api/trades')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data: UnifiedFeedResult = await res.json()
+      setLiveResult(data)
+    } catch (err) {
+      console.warn('[feed] live fetch failed, using mock data:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchLiveData()
+  }, [fetchLiveData])
+
+  // Use live trades if available, else fall back to mock
+  const allTrades = useMemo(() => {
+    if (liveResult && liveResult.trades.length > 0) return liveResult.trades
+    return getRecentTrades(100)
+  }, [liveResult])
+
+  const trades = useMemo(() => applyFilters(allTrades, filters), [allTrades, filters])
+
+  // Cluster alerts: prefer live, fallback to mock
+  const buyClusterAlerts = useMemo((): ClusterAlert[] => {
+    if (liveResult && liveResult.clusterAlerts.length > 0) {
+      return liveResult.clusterAlerts.filter((a) => a.isBuyCluster)
+    }
+    return getClusterAlerts().filter((a) => a.isBuyCluster)
+  }, [liveResult])
+
   const activeCommittee = filters.committeeId ? getCommitteeById(filters.committeeId) : undefined
-  const buyClusterAlerts = useMemo(() => getClusterAlerts().filter((a) => a.isBuyCluster), [])
 
   function handleSourceChange(source: FilterState['source']) {
-    // Changing source tab clears committee filter if switching away from congressional
     const next: FilterState = { ...filters, source }
     if (source === 'insider') next.committeeId = undefined
     setFilters(next)
@@ -49,9 +123,17 @@ export default function FeedPage() {
           <div className="flex items-center justify-between mb-3">
             <div>
               <h1 className="text-lg font-bold text-foreground">Insider Feed</h1>
-              <p className="text-xs text-muted-foreground">
-                {trades.length} recent trades
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs text-muted-foreground">
+                  {loading ? 'Loading...' : `${trades.length} recent trades`}
+                </p>
+                {!loading && liveResult && (
+                  <FreshnessIndicator
+                    fetchedAt={liveResult.fetchedAt}
+                    source={liveResult.sources.congressional}
+                  />
+                )}
+              </div>
             </div>
             <FilterDrawer filters={filters} onFiltersChange={handleFiltersChange} />
           </div>
@@ -97,6 +179,33 @@ export default function FeedPage() {
           )}
         </div>
       </div>
+
+      {/* Conviction Matches Banner */}
+      {liveResult && liveResult.convictionMatches.filter((m) => m.label === 'high').length > 0 && (
+        <div className="px-4 pt-3 space-y-2">
+          {liveResult.convictionMatches
+            .filter((m) => m.label === 'high')
+            .slice(0, 2)
+            .map((match) => (
+              <Link key={match.ticker} href={`/stock/${match.ticker}`}>
+                <div className="rounded-xl border border-blue-500/40 bg-blue-500/5 p-4 hover:bg-blue-500/10 transition-colors">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-bold text-blue-400 uppercase tracking-wide">
+                      High Conviction Signal
+                    </span>
+                    <span className="font-mono text-sm font-black text-foreground">
+                      {match.ticker}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {match.congressionalTrades.length} politician{match.congressionalTrades.length > 1 ? 's' : ''} +{' '}
+                    {match.insiderTrades.length} corporate insider{match.insiderTrades.length > 1 ? 's' : ''} both traded within {match.windowDays} days — score {match.score}/100
+                  </p>
+                </div>
+              </Link>
+            ))}
+        </div>
+      )}
 
       {/* Cluster Buy Alerts */}
       {buyClusterAlerts.length > 0 && (

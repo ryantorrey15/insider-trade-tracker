@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { StockHeader } from '@/components/stock/StockHeader'
 import { PriceChart } from '@/components/charts/PriceChart'
 import { TradeFeed } from '@/components/trades/TradeFeed'
+import { FreshnessIndicator } from '@/components/ui/FreshnessIndicator'
 import {
   getTradesByTicker,
   getPriceHistory,
@@ -14,37 +15,126 @@ import {
   getClusterAlertsForTicker,
   STOCKS,
 } from '@/lib/mock-data'
+import { fetchTickerDetail } from '@/lib/api'
 import { formatCurrency } from '@/lib/utils'
+import type { Stock } from '@/types'
 
 interface StockDetailPageProps {
-  params: { ticker: string }
+  params: Promise<{ ticker: string }>
 }
 
-export default function StockDetailPage({ params }: StockDetailPageProps) {
-  const ticker = params.ticker.toUpperCase()
-  const stock = STOCKS[ticker]
-  if (!stock) notFound()
+export default async function StockDetailPage({ params }: StockDetailPageProps) {
+  const { ticker: rawTicker } = await params
+  const ticker = rawTicker.toUpperCase()
 
-  const trades = getTradesByTicker(ticker)
+  // Fetch real data (with implicit fallback on error inside fetchTickerDetail)
+  const liveDetail = await fetchTickerDetail(ticker).catch(() => null)
+
+  // Build stock object: prefer live, fall back to mock
+  const mockStock = STOCKS[ticker]
+  const liveStock = liveDetail?.stock
+
+  // If ticker has no data in either source, 404
+  if (!liveStock && !mockStock) notFound()
+
+  const stock: Stock = liveStock?.companyName && liveStock.companyName !== ticker
+    ? liveStock
+    : (mockStock ?? liveStock!)
+
+  // Trades: prefer live combined, fall back to mock
+  const liveTrades = liveDetail
+    ? [...(liveDetail.insiderTrades), ...(liveDetail.relatedCongressionalTrades)]
+        .sort((a, b) => new Date(b.tradeDate).getTime() - new Date(a.tradeDate).getTime())
+    : []
+  const trades = liveTrades.length > 0 ? liveTrades : getTradesByTicker(ticker)
+
+  // Sentiment: compute from live trades if available, else mock
+  const buyTrades = trades.filter((t) => t.tradeType === 'buy')
+  const sellTrades = trades.filter((t) => t.tradeType === 'sell')
+  const totalVolume = trades.reduce((s, t) => s + t.amount, 0)
+  const bullishPercent = trades.length > 0
+    ? Math.round((buyTrades.length / trades.length) * 100)
+    : 50
+
+  const mockSentiment = getInsiderSentiment(ticker)
+  const sentiment = liveTrades.length > 0
+    ? { buyCount: buyTrades.length, sellCount: sellTrades.length, bullishPercent, totalVolume }
+    : mockSentiment
+
+  // Cluster alerts: from live detection or mock
+  const liveClusterAlerts = liveDetail?.convictionMatch
+    ? [{
+        id: `conv-${ticker}`,
+        ticker,
+        stock,
+        trades: [
+          ...liveDetail.relatedCongressionalTrades.slice(0, 3),
+          ...liveDetail.insiderTrades.slice(0, 3),
+        ],
+        windowDays: liveDetail.convictionMatch.windowDays,
+        totalVolume: [...liveDetail.relatedCongressionalTrades, ...liveDetail.insiderTrades]
+          .reduce((s, t) => s + t.amount, 0),
+        detectedAt: liveDetail.fetchedAt,
+        isBuyCluster: true,
+      }]
+    : []
+  const clusterAlerts = liveClusterAlerts.length > 0
+    ? liveClusterAlerts
+    : getClusterAlertsForTicker(ticker)
+
+  // Price history always from mock (Finnhub candles not on free tier)
   const priceHistory = getPriceHistory(ticker, 90)
+
+  // News: real from Finnhub if available in future; use mock for now
   const news = getNewsForTicker(ticker)
-  const sentiment = getInsiderSentiment(ticker)
-  const clusterAlerts = getClusterAlertsForTicker(ticker)
+
+  const fetchedAt = liveDetail?.fetchedAt ?? new Date().toISOString()
+  const isLive = liveTrades.length > 0
 
   return (
     <div className="min-h-screen">
       <div className="sticky top-[57px] z-30 bg-background/95 backdrop-blur-sm border-b border-border px-4 py-3">
-        <Button variant="ghost" size="sm" asChild className="-ml-2">
-          <Link href="/feed">
-            <ArrowLeft className="h-4 w-4" />
-            Back
-          </Link>
-        </Button>
+        <div className="flex items-center justify-between">
+          <Button variant="ghost" size="sm" asChild className="-ml-2">
+            <Link href="/feed">
+              <ArrowLeft className="h-4 w-4" />
+              Back
+            </Link>
+          </Button>
+          <FreshnessIndicator
+            fetchedAt={fetchedAt}
+            source={isLive ? 'live' : 'fallback'}
+          />
+        </div>
       </div>
 
       <div className="p-4 space-y-4">
         {/* Stock header */}
         <StockHeader stock={stock} />
+
+        {/* Conviction Match Banner */}
+        {liveDetail?.convictionMatch && liveDetail.convictionMatch.label !== 'low' && (
+          <div className={`rounded-xl border p-4 space-y-2 ${
+            liveDetail.convictionMatch.label === 'high'
+              ? 'border-blue-500/40 bg-blue-500/5'
+              : 'border-violet-500/40 bg-violet-500/5'
+          }`}>
+            <div className="flex items-center justify-between">
+              <span className={`text-xs font-bold uppercase tracking-wide ${
+                liveDetail.convictionMatch.label === 'high' ? 'text-blue-400' : 'text-violet-400'
+              }`}>
+                {liveDetail.convictionMatch.label === 'high' ? 'High' : 'Medium'} Conviction Signal
+              </span>
+              <span className="text-xs font-bold text-foreground">
+                Score: {liveDetail.convictionMatch.score}/100
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {liveDetail.convictionMatch.congressionalTrades.length} politician{liveDetail.convictionMatch.congressionalTrades.length > 1 ? 's' : ''} and{' '}
+              {liveDetail.convictionMatch.insiderTrades.length} corporate insider{liveDetail.convictionMatch.insiderTrades.length > 1 ? 's' : ''} both traded {ticker} within a {liveDetail.convictionMatch.windowDays}-day window.
+            </p>
+          </div>
+        )}
 
         {/* Insider Sentiment */}
         <div className="rounded-xl border border-border bg-card p-4 space-y-3">
@@ -89,7 +179,7 @@ export default function StockDetailPage({ params }: StockDetailPageProps) {
           </div>
         </div>
 
-        {/* Cluster Alerts */}
+        {/* Cluster / Conviction Alerts */}
         {clusterAlerts.filter((a) => a.isBuyCluster).map((alert) => (
           <div
             key={alert.id}
