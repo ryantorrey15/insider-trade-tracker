@@ -81,15 +81,17 @@ async function fetchHouseFilings(year: number): Promise<DisclosureFiling[]> {
   return filings
 }
 
-/** Get the N most recently filed PTRs (highest docId = most recent) */
+/**
+ * Get PTRs sorted by DocId descending (highest = most recent).
+ * Pass count=Infinity or a large number to get all filings.
+ */
 export async function getRecentHouseFilings(
   count = 30,
   year = new Date().getFullYear()
 ): Promise<DisclosureFiling[]> {
   const filings = await fetchHouseFilings(year)
-  return filings
-    .sort((a, b) => parseInt(b.docId) - parseInt(a.docId))
-    .slice(0, count)
+  const sorted = filings.sort((a, b) => parseInt(b.docId) - parseInt(a.docId))
+  return count >= sorted.length ? sorted : sorted.slice(0, count)
 }
 
 // ─── PDF parser ───────────────────────────────────────────
