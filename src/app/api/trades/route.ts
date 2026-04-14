@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { fetchUnifiedFeed } from '@/lib/api'
 
-export const revalidate = 4 * 60 * 60 // 4 hours
+export const dynamic = 'force-dynamic'
 
 export async function GET() {
   try {

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { fetchCongressionalTrades } from '@/lib/api/congressional'
 import { enrichStock } from '@/lib/api/stocks'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
   const q = (searchParams.get('q') ?? '').trim().toUpperCase()

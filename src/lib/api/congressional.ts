@@ -1,7 +1,9 @@
 import type { QuiverCongressTrade } from './types'
 import type { Trade, Person, Stock, TradeType, SignalType } from '@/types'
+import { getRecentTrades } from '@/lib/mock-data'
 
 const QUIVER_URL = 'https://api.quiverquant.com/beta/live/congresstrading'
+const QUIVER_KEY = process.env.QUIVER_API_KEY ?? ''
 
 // ─── Range parser ────────────────────────────────────────
 // "$50,001 - $100,000" → { min: 50001, max: 100000, mid: 75000 }
@@ -109,9 +111,12 @@ export interface CongressionalTradesResult {
 
 export async function fetchCongressionalTrades(): Promise<CongressionalTradesResult> {
   try {
+    const headers: Record<string, string> = { 'Accept': 'application/json' }
+    if (QUIVER_KEY) headers['Authorization'] = `Bearer ${QUIVER_KEY}`
+
     const res = await fetch(QUIVER_URL, {
       next: { revalidate: 4 * 60 * 60 }, // cache 4 hours
-      headers: { 'Accept': 'application/json' },
+      headers,
     })
 
     if (!res.ok) throw new Error(`Quiver Quant returned ${res.status}`)
@@ -133,6 +138,8 @@ export async function fetchCongressionalTrades(): Promise<CongressionalTradesRes
     return { trades, fetchedAt: new Date().toISOString(), source: 'live' }
   } catch (err) {
     console.error('[congressional] fetch failed:', err)
-    return { trades: [], fetchedAt: new Date().toISOString(), source: 'fallback' }
+    // Fall back to mock congressional trades so the UI is never empty
+    const mockTrades = getRecentTrades(100, { source: 'congressional', tradeType: 'all' })
+    return { trades: mockTrades, fetchedAt: new Date().toISOString(), source: 'fallback' }
   }
 }
