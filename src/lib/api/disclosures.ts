@@ -126,36 +126,15 @@ function parsePtrText(
 ): ParsedDisclosureTrade[] {
   const trades: ParsedDisclosureTrade[] = []
 
-  // Normalize: collapse multiple whitespace but keep newlines for structure
-  const normalized = text.replace(/[ \t]+/g, ' ')
-  const lines = normalized.split('\n').map((l) => l.trim()).filter(Boolean)
+  // unpdf merges pages into one string with spaces.
+  // Pattern: (TICKER) [ST] {S|P} MM/DD/YYYY MM/DD/YYYY $X - $Y
+  const tradeRegex =
+    /\(([A-Z]{1,5})\)\s*\[(?:ST|OP|OT)\]\s+([PSE])\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}\/\d{2}\/\d{4})\s+(\$[\d,]+(?:\s*[-–]\s*\$?[\d,]+|\s*\+)?)/g
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-
-    // Match ticker pattern: (AMZN) [ST]
-    const tickerMatch = line.match(/\(([A-Z]{1,5})\)\s*\[(?:ST|OP|OT)\]/)
-    if (!tickerMatch) continue
-
-    const ticker = tickerMatch[1]
-
-    // Transaction data is on the next 1-3 lines
-    // Format: {P|S|E|D}{MM/DD/YYYY}{MM/DD/YYYY}{$amount}
-    const nextLines = lines.slice(i + 1, i + 4).join(' ')
-    const txMatch = nextLines.match(
-      /([PSE])\s*(\d{2}\/\d{2}\/\d{4})\s*(\d{2}\/\d{2}\/\d{4})\s*(\$[\d,]+(?:\s*[-–]\s*\$?[\d,]+|\s*\+)?)/
-    )
-    if (!txMatch) continue
-
-    const [, txType, tradeDate, notifDate, amountRaw] = txMatch
-
-    // Also grab any overflow from the line after (amount can split across lines)
-    const amountOverflow = lines[i + 4]?.match(/^\$?[\d,]+/)
-    const fullAmount = amountOverflow
-      ? `${amountRaw} ${amountOverflow[0]}`
-      : amountRaw
-
-    const amount = parseAmountRange(fullAmount)
+  let match: RegExpExecArray | null
+  while ((match = tradeRegex.exec(text)) !== null) {
+    const [, ticker, txType, tradeDate, notifDate, amountRaw] = match
+    const amount = parseAmountRange(amountRaw)
     if (amount.mid === 0) continue
 
     trades.push({
@@ -187,11 +166,10 @@ export async function parsePtrPdf(
     })
     if (!res.ok) return []
     const arrayBuffer = await res.arrayBuffer()
-    const buffer = Buffer.from(arrayBuffer)
-    // Dynamic import avoids pdf-parse v1 test-file side-effect at module load time
-    const { default: pdfParse } = await import('pdf-parse')
-    const parsed = await pdfParse(buffer)
-    return parsePtrText(parsed.text, filing)
+    const { extractText } = await import('unpdf')
+    const { text } = await extractText(new Uint8Array(arrayBuffer), { mergePages: true })
+    const fullText = Array.isArray(text) ? text.join(' ') : text
+    return parsePtrText(fullText, filing)
   } catch {
     return []
   }

@@ -8,11 +8,12 @@ export async function GET() {
   let parseError = ''
   if (fetchRes.ok) {
     try {
-      const buf = Buffer.from(await fetchRes.arrayBuffer())
-      const { default: pdfParse } = await import('pdf-parse')
-      const parsed = await pdfParse(buf)
-      parseResult = parsed.text.substring(0, 300)
-    } catch(e: unknown) {
+      const buf = new Uint8Array(await fetchRes.arrayBuffer())
+      const { extractText } = await import('unpdf')
+      const { text } = await extractText(buf, { mergePages: true })
+      const full = Array.isArray(text) ? text.join(' ') : text
+      parseResult = full.substring(0, 400)
+    } catch(e) {
       parseError = e instanceof Error ? e.message : String(e)
     }
   }
