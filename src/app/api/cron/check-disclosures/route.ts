@@ -12,6 +12,7 @@
 import { NextResponse } from 'next/server'
 import { fetchRecentDisclosures } from '@/lib/api/disclosures'
 import { fetchSecForm4Trades } from '@/lib/api/sec-form4'
+import { toStoredTrade, type StoredTrade } from '@/lib/api/storage-trade'
 import type { Trade } from '@/types'
 
 export const dynamic = 'force-dynamic'
@@ -77,10 +78,13 @@ export async function GET(req: Request) {
     `[cron] fetched ${congressional.length} congressional, ${corporate.length} corporate trades in ${Date.now() - startedAt}ms`
   )
 
-  // Store in Edge Config — cap at 50 congressional + 150 corporate to stay under item size limits
+  // Store compact trades in Edge Config — slim format is ~65% smaller than full Trade objects
+  const slimCongressional: StoredTrade[] = congressional.slice(0, 80).map(toStoredTrade)
+  const slimCorporate: StoredTrade[] = corporate.slice(0, 120).map(toStoredTrade)
+
   await writeEdgeConfigItems([
-    { key: 'congressionalTrades', value: congressional.slice(0, 50) },
-    { key: 'corporateTrades', value: corporate.slice(0, 150) },
+    { key: 'congressionalTrades', value: slimCongressional },
+    { key: 'corporateTrades', value: slimCorporate },
     { key: 'tradesUpdatedAt', value: new Date().toISOString() },
   ])
 

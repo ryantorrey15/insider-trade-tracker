@@ -10,6 +10,7 @@ import { createClient } from '@vercel/edge-config'
 import type { Trade, ClusterAlert, Stock, SignalType } from '@/types'
 import { fetchCongressionalTrades } from './congressional'
 import { fetchInsiderTransactions, fetchProfile, fetchQuote, enrichStock } from './stocks'
+import { fromStoredTrade, type StoredTrade } from './storage-trade'
 import { getRecentTrades } from '@/lib/mock-data'
 
 // ─── Cross-source conviction matching ────────────────────
@@ -192,13 +193,17 @@ async function readCachedTrades(): Promise<{ congressional: Trade[] | null; corp
     const url = process.env.EDGE_CONFIG
     if (!url) return { congressional: null, corporate: null }
     const client = createClient(url)
-    const [congressional, corporate] = await Promise.all([
-      client.get<Trade[]>('congressionalTrades'),
-      client.get<Trade[]>('corporateTrades'),
+    const [rawCongressional, rawCorporate] = await Promise.all([
+      client.get<StoredTrade[]>('congressionalTrades'),
+      client.get<StoredTrade[]>('corporateTrades'),
     ])
     return {
-      congressional: Array.isArray(congressional) && congressional.length > 0 ? congressional : null,
-      corporate: Array.isArray(corporate) && corporate.length > 0 ? corporate : null,
+      congressional: Array.isArray(rawCongressional) && rawCongressional.length > 0
+        ? rawCongressional.map(fromStoredTrade)
+        : null,
+      corporate: Array.isArray(rawCorporate) && rawCorporate.length > 0
+        ? rawCorporate.map(fromStoredTrade)
+        : null,
     }
   } catch {
     return { congressional: null, corporate: null }
