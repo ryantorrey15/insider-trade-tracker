@@ -7,9 +7,8 @@ import { cn } from '@/lib/utils'
 import { TradeFeed } from '@/components/trades/TradeFeed'
 import { FilterDrawer } from '@/components/trades/FilterDrawer'
 import { FreshnessIndicator } from '@/components/ui/FreshnessIndicator'
-import { getRecentTrades, getCommitteeById, getClusterAlerts, COMMITTEES } from '@/lib/mock-data'
-import { formatCurrency } from '@/lib/utils'
-import type { FilterState, Trade, ClusterAlert } from '@/types'
+import { getRecentTrades, getCommitteeById, COMMITTEES } from '@/lib/mock-data'
+import type { FilterState, Trade } from '@/types'
 import type { UnifiedFeedResult } from '@/lib/api'
 
 const SOURCE_TABS: Array<{ label: string; value: FilterState['source'] }> = [
@@ -90,14 +89,6 @@ export default function FeedPage() {
   }, [liveResult])
 
   const trades = useMemo(() => applyFilters(allTrades, filters), [allTrades, filters])
-
-  // Cluster alerts: prefer live, fallback to mock
-  const buyClusterAlerts = useMemo((): ClusterAlert[] => {
-    if (liveResult && liveResult.clusterAlerts.length > 0) {
-      return liveResult.clusterAlerts.filter((a) => a.isBuyCluster)
-    }
-    return getClusterAlerts().filter((a) => a.isBuyCluster)
-  }, [liveResult])
 
   const activeCommittee = filters.committeeId ? getCommitteeById(filters.committeeId) : undefined
 
@@ -204,36 +195,6 @@ export default function FeedPage() {
                 </div>
               </Link>
             ))}
-        </div>
-      )}
-
-      {/* Cluster Buy Alerts */}
-      {buyClusterAlerts.length > 0 && (
-        <div className="px-4 pt-3 space-y-2">
-          {buyClusterAlerts.map((alert) => (
-            <Link key={alert.id} href={`/stock/${alert.ticker}`}>
-              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 hover:bg-amber-500/10 transition-colors">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-bold text-amber-400 uppercase tracking-wide">
-                    Cluster Buy Alert
-                  </span>
-                  <span className="font-mono text-sm font-black text-foreground">
-                    {alert.ticker}
-                  </span>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {alert.trades.length} insiders purchased {alert.ticker} within {alert.windowDays} days — total {formatCurrency(alert.totalVolume)}
-                </p>
-                <div className="flex flex-wrap gap-1.5 mt-2">
-                  {alert.trades.map((t) => (
-                    <span key={t.id} className="text-[10px] font-medium text-amber-300/80 bg-amber-500/10 rounded px-1.5 py-0.5">
-                      {t.person.name}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </Link>
-          ))}
         </div>
       )}
 

@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import Link from 'next/link'
 import { Bell, BellOff, Plus, Trash2, TrendingUp, User, Zap } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -13,8 +14,10 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { SignalBadge } from '@/components/trades/SignalBadge'
-import { cn } from '@/lib/utils'
-import type { Alert, SignalType } from '@/types'
+import { cn, formatCurrency } from '@/lib/utils'
+import { getClusterAlerts } from '@/lib/mock-data'
+import type { Alert, SignalType, ClusterAlert } from '@/types'
+import type { UnifiedFeedResult } from '@/lib/api'
 
 const MOCK_ALERTS: Alert[] = [
   {
@@ -60,6 +63,23 @@ export default function AlertsPage() {
   const [addOpen, setAddOpen] = useState(false)
   const [addType, setAddType] = useState<Alert['type']>('ticker')
   const [addInput, setAddInput] = useState('')
+  const [clusterAlerts, setClusterAlerts] = useState<ClusterAlert[]>([])
+
+  const fetchClusterAlerts = useCallback(async () => {
+    try {
+      const res = await fetch('/api/trades')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data: UnifiedFeedResult = await res.json()
+      const buys = data.clusterAlerts.filter((a) => a.isBuyCluster)
+      setClusterAlerts(buys.length > 0 ? buys : getClusterAlerts().filter((a) => a.isBuyCluster))
+    } catch {
+      setClusterAlerts(getClusterAlerts().filter((a) => a.isBuyCluster))
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchClusterAlerts()
+  }, [fetchClusterAlerts])
 
   function toggleAlert(id: string) {
     setAlerts((prev) =>
@@ -107,6 +127,7 @@ export default function AlertsPage() {
             <h1 className="text-lg font-bold text-foreground">Alerts</h1>
             <p className="text-xs text-muted-foreground">
               {alerts.filter((a) => a.enabled).length} active
+              {clusterAlerts.length > 0 && ` · ${clusterAlerts.length} cluster alert${clusterAlerts.length > 1 ? 's' : ''}`}
             </p>
           </div>
           <Dialog open={addOpen} onOpenChange={setAddOpen}>
@@ -178,6 +199,39 @@ export default function AlertsPage() {
           </Dialog>
         </div>
       </div>
+
+      {/* Cluster Buy Alerts */}
+      {clusterAlerts.length > 0 && (
+        <div className="px-4 pt-4 space-y-2">
+          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+            Cluster Buy Alerts
+          </p>
+          {clusterAlerts.map((alert) => (
+            <Link key={alert.id} href={`/stock/${alert.ticker}`}>
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-4 hover:bg-amber-500/10 transition-colors">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-bold text-amber-400 uppercase tracking-wide">
+                    Cluster Buy Alert
+                  </span>
+                  <span className="font-mono text-sm font-black text-foreground">
+                    {alert.ticker}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {alert.trades.length} insiders purchased {alert.ticker} within {alert.windowDays} days — total {formatCurrency(alert.totalVolume)}
+                </p>
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {alert.trades.map((t) => (
+                    <span key={t.id} className="text-[10px] font-medium text-amber-300/80 bg-amber-500/10 rounded px-1.5 py-0.5">
+                      {t.person.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
 
       <div className="p-4">
         {alerts.length === 0 ? (

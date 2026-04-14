@@ -1,14 +1,17 @@
 /**
  * Unified data layer
  *
- * Combines congressional trades (Quiver Quant) and corporate insider trades
- * (Finnhub). Cross-matches same-ticker trades within a 90-day window to
- * generate conviction signals.
+ * Congressional: House PTR disclosures scraped directly from disclosures-clerk.house.gov
+ * Corporate:     SEC EDGAR Form 4 filings (no API key required)
+ * Enrichment:    FMP batch profile/quote lookups for company names and prices
  */
 
 import type { Trade, ClusterAlert, Stock, SignalType } from '@/types'
 import { fetchCongressionalTrades } from './congressional'
-import { fetchInsiderTransactions, enrichStock } from './stocks'
+import { fetchInsiderTransactions, fetchProfile, fetchQuote, enrichStock } from './stocks'
+import { fetchSecForm4Trades } from './sec-form4'
+import { fetchRecentDisclosures } from './disclosures'
+import { getRecentTrades } from '@/lib/mock-data'
 
 // ─── Cross-source conviction matching ────────────────────
 
@@ -184,48 +187,104 @@ export interface UnifiedFeedResult {
   sources: { congressional: 'live' | 'fallback'; insider: 'live' | 'fallback' }
 }
 
+/** Resolves to fallback if promise takes longer than ms */
+async function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer!))
+}
+
+/** Batch-enrich a list of trades with FMP company names/prices (top N unique tickers) */
+async function enrichTradeBatch(trades: Trade[], maxTickers = 15): Promise<Trade[]> {
+  if (!process.env.FMP_API_KEY) return trades
+
+  const tickers = Array.from(new Set(trades.map((t) => t.ticker))).slice(0, maxTickers)
+
+  const [quotes, profiles] = await Promise.all([
+    Promise.allSettled(tickers.map((t) => fetchQuote(t))),
+    Promise.allSettled(tickers.map((t) => fetchProfile(t))),
+  ])
+
+  const stockMap = new Map<string, Partial<Stock>>()
+  tickers.forEach((ticker, i) => {
+    const quote = quotes[i].status === 'fulfilled' ? quotes[i].value : null
+    const profile = profiles[i].status === 'fulfilled' ? profiles[i].value : null
+    stockMap.set(ticker, {
+      companyName: (profile as { companyName?: string } | null)?.companyName || quote?.name || ticker,
+      sector: (profile as { sector?: string; industry?: string } | null)?.sector || (profile as { industry?: string } | null)?.industry || 'Unknown',
+      logoUrl: (profile as { image?: string } | null)?.image || undefined,
+      currentPrice: quote?.price || undefined,
+      priceChange: quote?.change || undefined,
+      priceChangePercent: quote?.changePercentage || undefined,
+    })
+  })
+
+  return trades.map((t) => {
+    const enrichment = stockMap.get(t.ticker)
+    if (!enrichment) return t
+    return { ...t, stock: { ...t.stock, ...enrichment } }
+  })
+}
+
 /**
- * Fetches congressional trades (all) plus insider trades for any tickers
- * that appear in the congressional feed, then cross-matches them.
+ * Fetches congressional trades from House PTR disclosures (real data),
+ * corporate insider trades from SEC EDGAR Form 4, then cross-matches them.
  */
 export async function fetchUnifiedFeed(): Promise<UnifiedFeedResult> {
   const fetchedAt = new Date().toISOString()
 
-  // 1. Congressional trades
-  const congResult = await fetchCongressionalTrades()
-  const congTrades = congResult.trades
+  // 1. Congressional — House PTR disclosures (real), timeout after 8s → mock fallback
+  let congTrades: Trade[]
+  let congSource: 'live' | 'fallback'
 
-  // 2. Unique tickers in congressional feed (limit to 20 to stay within rate limits)
-  const uniqueTickers = Array.from(new Set(congTrades.map((t) => t.ticker))).slice(0, 20)
+  const disclosureFallback = { trades: [] as Trade[], source: 'unavailable' as const, filings: [], parsedCount: 0, fetchedAt }
+  const disclosureResult = await withTimeout(fetchRecentDisclosures(4), 8_000, disclosureFallback)
 
-  // 3. Insider trades for those tickers (parallel, but rate-limit-aware)
+  if (disclosureResult.trades.length > 0) {
+    congTrades = disclosureResult.trades
+    congSource = 'live'
+  } else {
+    // Quiver Quant also tried as secondary fallback (usually 401s too, so goes straight to mock)
+    const quiverResult = await withTimeout(fetchCongressionalTrades(), 4_000, {
+      trades: getRecentTrades(100, { source: 'congressional', tradeType: 'all' }),
+      fetchedAt,
+      source: 'fallback' as const,
+    })
+    congTrades = quiverResult.trades
+    congSource = quiverResult.source
+  }
+
+  // 2. Corporate — SEC EDGAR Form 4 (always fresh, no API key needed)
   let allInsiderTrades: Trade[] = []
   let insiderSource: 'live' | 'fallback' = 'fallback'
 
-  if (process.env.FINNHUB_API_KEY) {
-    const insiderBatches = await Promise.allSettled(
-      uniqueTickers.map((ticker) => fetchInsiderTransactions(ticker))
-    )
-    for (const result of insiderBatches) {
-      if (result.status === 'fulfilled') {
-        allInsiderTrades = allInsiderTrades.concat(result.value)
-      }
-    }
-    if (allInsiderTrades.length > 0) insiderSource = 'live'
-  }
+  const rawForm4 = await withTimeout(fetchSecForm4Trades(), 20_000, [])
+  // Filter out trivial trades (<$10K) — keeps the feed signal-rich
+  allInsiderTrades = rawForm4.filter((t) => t.amount >= 10_000)
 
-  // 4. Conviction matching
-  const convictionMatches = findConvictionMatches(congTrades, allInsiderTrades)
+  if (allInsiderTrades.length > 0) insiderSource = 'live'
+  else allInsiderTrades = getRecentTrades(50, { source: 'insider', tradeType: 'all' })
+
+  // 3. Enrich company names/prices for both feeds via FMP
+  const [enrichedCong, enrichedInsider] = await Promise.all([
+    enrichTradeBatch(congTrades, 10),
+    enrichTradeBatch(allInsiderTrades, 15),
+  ])
+
+  // 4. Conviction matching — same ticker traded by politician + corporate insider within 90 days
+  const convictionMatches = findConvictionMatches(enrichedCong, enrichedInsider)
 
   // 5. Tag strong conviction onto trades
-  const taggedCong = tagConviction(congTrades, convictionMatches)
-  const taggedInsider = tagConviction(allInsiderTrades, convictionMatches)
+  const taggedCong = tagConviction(enrichedCong, convictionMatches)
+  const taggedInsider = tagConviction(enrichedInsider, convictionMatches)
 
-  // 6. Cluster alerts across combined trades
+  // 6. Cluster alerts across both sources
   const allTrades = [...taggedCong, ...taggedInsider]
   const clusterAlerts = detectClusterAlerts(allTrades)
 
-  // 7. Combined feed sorted by trade date
+  // 7. Combined feed — freshest trades first
   const trades = allTrades.sort(
     (a, b) => new Date(b.tradeDate).getTime() - new Date(a.tradeDate).getTime()
   )
@@ -235,7 +294,7 @@ export async function fetchUnifiedFeed(): Promise<UnifiedFeedResult> {
     convictionMatches,
     clusterAlerts,
     fetchedAt,
-    sources: { congressional: congResult.source, insider: insiderSource },
+    sources: { congressional: congSource, insider: insiderSource },
   }
 }
 

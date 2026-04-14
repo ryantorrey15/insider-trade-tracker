@@ -91,7 +91,7 @@ export async function fetchCompanyNews(
   }
 }
 
-// ─── Insider transactions ─────────────────────────────────
+// ─── Insider transactions (per-ticker, Finnhub) ───────────
 function normalizeInsiderTransactionType(code: string): TradeType {
   switch (code) {
     case 'P': return 'buy'

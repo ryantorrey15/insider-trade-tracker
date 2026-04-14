@@ -163,6 +163,7 @@ export async function parsePtrPdf(
   try {
     const res = await fetch(filing.pdfUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
+      next: { revalidate: 24 * 60 * 60 }, // PDFs are immutable once filed
     })
     if (!res.ok) return []
     const arrayBuffer = await res.arrayBuffer()
