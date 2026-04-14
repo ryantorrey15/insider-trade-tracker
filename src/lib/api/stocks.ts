@@ -1,6 +1,4 @@
 import type {
-  FinnhubQuote,
-  FinnhubProfile,
   FinnhubNewsArticle,
   FinnhubInsiderTransaction,
   FinnhubInsiderTransactionsResponse,
@@ -8,39 +6,68 @@ import type {
 } from './types'
 import type { Trade, Person, Stock, TradeType, SignalType } from '@/types'
 
+// ─── FMP (quotes + profiles) ──────────────────────────────
+const FMP_BASE = 'https://financialmodelingprep.com/stable'
+const FMP_KEY = process.env.FMP_API_KEY ?? ''
+
+function fmpUrl(path: string, params: Record<string, string> = {}): string {
+  const search = new URLSearchParams({ ...params, apikey: FMP_KEY })
+  return `${FMP_BASE}${path}?${search.toString()}`
+}
+
+// ─── Finnhub (insider transactions + sentiment) ───────────
 const FINNHUB_BASE = 'https://finnhub.io/api/v1'
-const API_KEY = process.env.FINNHUB_API_KEY ?? ''
+const FINNHUB_KEY = process.env.FINNHUB_API_KEY ?? ''
 
 function finnhubUrl(path: string, params: Record<string, string> = {}): string {
-  const search = new URLSearchParams({ ...params, token: API_KEY })
+  const search = new URLSearchParams({ ...params, token: FINNHUB_KEY })
   return `${FINNHUB_BASE}${path}?${search.toString()}`
 }
 
-// ─── Quote ───────────────────────────────────────────────
-export async function fetchQuote(ticker: string): Promise<FinnhubQuote | null> {
+interface FmpQuote {
+  symbol: string
+  price: number
+  change: number
+  changePercentage: number
+  volume: number
+  marketCap: number
+  name: string
+}
+
+interface FmpProfile {
+  symbol: string
+  companyName: string
+  industry: string
+  sector: string
+  image: string
+  website: string
+}
+
+// ─── Quote (FMP) ─────────────────────────────────────────
+export async function fetchQuote(ticker: string): Promise<FmpQuote | null> {
+  if (!FMP_KEY) return null
   try {
-    const res = await fetch(finnhubUrl('/quote', { symbol: ticker }), {
+    const res = await fetch(fmpUrl('/quote', { symbol: ticker }), {
       next: { revalidate: 5 * 60 }, // 5 min
     })
     if (!res.ok) return null
-    const data: FinnhubQuote = await res.json()
-    if (!data.c) return null
-    return data
+    const data: FmpQuote[] = await res.json()
+    return data?.[0] ?? null
   } catch {
     return null
   }
 }
 
-// ─── Profile ─────────────────────────────────────────────
-export async function fetchProfile(ticker: string): Promise<FinnhubProfile | null> {
+// ─── Profile (FMP) ───────────────────────────────────────
+export async function fetchProfile(ticker: string): Promise<FmpProfile | null> {
+  if (!FMP_KEY) return null
   try {
-    const res = await fetch(finnhubUrl('/stock/profile2', { symbol: ticker }), {
+    const res = await fetch(fmpUrl('/profile', { symbol: ticker }), {
       next: { revalidate: 24 * 60 * 60 }, // 24h
     })
     if (!res.ok) return null
-    const data: FinnhubProfile = await res.json()
-    if (!data.name) return null
-    return data
+    const data: FmpProfile[] = await res.json()
+    return data?.[0] ?? null
   } catch {
     return null
   }
@@ -198,12 +225,12 @@ export async function enrichStock(ticker: string): Promise<Stock> {
 
   return {
     ticker: ticker.toUpperCase(),
-    companyName: profile?.name || ticker.toUpperCase(),
-    sector: profile?.finnhubIndustry || 'Unknown',
-    logoUrl: profile?.logo || undefined,
-    currentPrice: quote?.c || undefined,
-    priceChange: quote?.d || undefined,
-    priceChangePercent: quote?.dp || undefined,
+    companyName: profile?.companyName || quote?.name || ticker.toUpperCase(),
+    sector: profile?.sector || profile?.industry || 'Unknown',
+    logoUrl: profile?.image || undefined,
+    currentPrice: quote?.price || undefined,
+    priceChange: quote?.change || undefined,
+    priceChangePercent: quote?.changePercentage || undefined,
   }
 }
 
